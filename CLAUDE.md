@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Install dependencies
-uv venv && uv pip install -e ".[dev]"
+# Install dependencies (include ML extras for phases 2b–4)
+uv venv && uv pip install -e ".[dev,ml]"
 
 # Run tests
 uv run pytest tests/ -v
@@ -31,6 +31,17 @@ uv run uvicorn trading_copilot.api.webhook:app --reload --port 8000
 uv run python scripts/backfill_prices.py --watchlist
 uv run python scripts/backfill_prices.py --tickers AAPL MSFT --from 2015-01-01
 uv run python scripts/backfill_prices.py --universe   # full S&P500 + ETFs
+
+# Backtest (Phase 2)
+uv run python scripts/run_backtest.py --watchlist --from 2020-01-01
+uv run python scripts/run_backtest.py -t AAPL -t NVDA --from 2022-01-01 --threshold 0.05 --trades
+
+# Train ML signal model (Phase 2b) — cap --to for out-of-sample validation
+uv run python scripts/train_ml.py --watchlist --from 2018-01-01
+uv run python scripts/train_ml.py --watchlist --from 2018-01-01 --to 2024-12-31
+
+# Train ensemble meta-model (Phase 4) — run after train_ml.py
+uv run python scripts/train_ensemble.py --watchlist --from 2018-01-01
 ```
 
 ## Architecture
@@ -43,8 +54,12 @@ The system is a swing trading assistant that scans stocks/ETFs for signals, send
 APScheduler (scheduler.py)
   ├── Daily scan (6:30 AM ET)
   │     ├── tiingo.py → DuckDB cache (OHLCV)
-  │     ├── signals/rules.py → compute RSI, MACD, MA crossover, volume spike
-  │     ├── signals/scorer.py → conviction score per ticker
+  │     ├── news.py → NewsAPI headlines (last 3 days)
+  │     ├── sentiment/tagger.py → macro theme score per ticker
+  │     ├── signals/rules.py → RSI, MACD, MA crossover, volume spike
+  │     ├── signals/scorer.py → conviction (ensemble > ML > rule-based)
+  │     │     ├── signals/ml/predictor.py → P(profitable) from GradientBoosting
+  │     │     └── signals/ensemble.py → meta-model blend of all three layers
   │     ├── notifications/charts.py → mplfinance PNG
   │     └── notifications/ntfy.py → push alert with Enter/Skip buttons
   └── Position monitor (4 PM ET after close)
@@ -62,33 +77,40 @@ FastAPI webhook (api/webhook.py) — receives ntfy button callbacks
 - **DuckDB** (`data/market.duckdb`) — append-only OHLCV and news headline cache. Never modify existing rows.
 - **SQLite** (`data/positions.db`) — `Opportunity` and `Position` tables via SQLModel. Every signal is saved as an Opportunity; only user-confirmed ones become Positions. This table is the ML training dataset.
 
-### Signal pipeline (Phase 1 — rule-based)
+### Signal pipeline
 
-`signals/rules.py` computes indicators via the `ta` library and returns `Signal` objects (type, direction, strength 0–1). `signals/scorer.py` weights them by type, requires ≥2 agreeing signals, and produces an `Opportunity` with entry/stop/target prices.
+Conviction is computed in three layers; the highest available layer wins:
 
-Conviction threshold for watchlist alerts: `config.yaml → conviction_threshold` (default 0.6).  
-Discovery threshold for universe screener suggestions: `discovery_threshold` (default 0.7).
+1. **Rule-based** (`signals/rules.py` + `signals/scorer.py`) — RSI, MACD, MA crossover, volume spike. Requires ≥2 agreeing signals. Always available.
+2. **ML model** (`signals/ml/`) — GradientBoosting classifier trained on 21 indicator features predicting 10-day return direction. Trained via `scripts/train_ml.py`. CV ROC-AUC ~0.57–0.60.
+3. **Ensemble** (`signals/ensemble.py`) — Logistic regression meta-model blending rule + ML + sentiment. Trained via `scripts/train_ensemble.py`. CV ROC-AUC ~0.84. Improves as live outcome data accumulates.
+
+**Sentiment veto**: if macro sentiment strongly contradicts the technical direction (threshold 0.4), the opportunity is suppressed before reaching the user.
+
+Conviction threshold for watchlist alerts: `config.yaml → conviction_threshold` (default 0.05).  
+Discovery threshold for universe screener: `discovery_threshold` (default 0.10).
+
+Backtest baseline (2025 out-of-sample, ML trained on 2018–2024): Sharpe 0.44, win rate 50%, expectancy 0.63%/trade, max drawdown 3%.
 
 ### Configuration
 
 - `config.yaml` — watchlist, signal parameters, scheduler cron times, swing trade percentages
 - `.env` — API keys (Tiingo, NewsAPI), ntfy topic, webhook base URL, DB paths
+- `data/ml_signal_model.joblib` — trained ML model (gitignored)
+- `data/ensemble_model.joblib` — trained ensemble model (gitignored)
 
-### Planned phases
+### Completed phases
 
-**Phase 2 — Backtest engine**
-Build `backtest/engine.py`: replay DuckDB OHLCV day-by-day, apply current signal rules as if live, simulate entries/exits, output metrics (Sharpe, CAGR, max drawdown, win rate, expectancy). Entry point: `scripts/run_backtest.py --strategy rsi_macd --from 2020-01-01`. Required before ML — validates that signals have a historical edge and allows threshold tuning with evidence.
+**Phase 1 — Rule-based signals** ✓  
+**Phase 2 — Backtest engine** ✓ (`backtest/engine.py`, `backtest/metrics.py`, `scripts/run_backtest.py`)  
+**Phase 2b — ML signal layer** ✓ (`signals/ml/features.py`, `trainer.py`, `predictor.py`, `scripts/train_ml.py`)  
+**Phase 3 — Sentiment pipeline** ✓ (`sentiment/tagger.py`, 13 macro themes, NewsAPI integration, veto mechanism)  
+**Phase 4 — Ensemble** ✓ (`signals/ensemble.py`, `scripts/train_ensemble.py`)
 
-**Phase 2b — ML signal layer**
-Train a scikit-learn classifier in `signals/ml/` that predicts 5–10 day return direction using rule-based indicators as features. Labels come from the `opportunities` table (live outcomes) + historical backfill. Replaces hard-coded conviction weights with learned ones.
-
-**Phase 3 — News/sentiment pipeline**
-- Backfill headlines from GDELT aligned with historical price moves → auto-labeled `(headline, ticker, outcome)` training set
-- `sentiment/tagger.py`: lookup table mapping macro entities (Hormuz, Fed rate hike, oil supply, etc.) to per-ticker directional effects — same headline can be bullish for one asset and bearish for another
-- Integrate sentiment score into daily scan alongside rule signals
+### Remaining phases
 
 **Phase 3b — Learned ticker-contextualized embeddings**
-Upgrade `sentiment/tagger.py` lookup table to a sentence-transformer model trained on `(headline_embedding ⊕ ticker_embedding) → price_direction`. Training data from GDELT backfill. Captures non-obvious correlations the lookup table misses.
+Upgrade `sentiment/tagger.py` keyword matching to a sentence-transformer model trained on `(headline_embedding ⊕ ticker_embedding) → price_direction`. Requires GDELT historical headline backfill (paid NewsAPI or GDELT BigQuery). Fixes noisy keyword matches on the free NewsAPI tier.
 
-**Phase 4 — Ensemble**
-Meta-model in `signals/ensemble.py` taking rule conviction + ML score + sentiment score as inputs, outputting a single weighted conviction score. Trained on the full `opportunities` outcome history.
+**Ensemble retraining (ongoing)**
+As the live system accumulates `Opportunity` records with real sentiment scores and outcomes, periodically retrain the ensemble on that data. Sentiment weight is currently 0 (no historical training data); it will become non-zero as live data accumulates.

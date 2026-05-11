@@ -12,7 +12,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from trading_copilot.config import config, settings
 from trading_copilot.data.tiingo import get_ohlcv, get_ohlcv_cached_only
+from trading_copilot.data.news import fetch_newsapi, store_headlines
 from trading_copilot.data.universe import FULL_UNIVERSE
+from trading_copilot.sentiment.tagger import TICKER_QUERIES, score_headlines
 from trading_copilot.notifications.charts import generate_chart
 from trading_copilot.notifications.ntfy import (
     send_discovery_alert,
@@ -49,6 +51,24 @@ def _fetch_df(ticker: str, days: int = 200):
     return get_ohlcv(ticker, start=start, end=end)
 
 
+def _fetch_sentiment(ticker: str) -> tuple[float | None, list[str]]:
+    """Fetch last 3 days of headlines and return (sentiment_score, themes)."""
+    from datetime import date, timedelta
+    query = TICKER_QUERIES.get(ticker)
+    if not query or not settings.news_api_key:
+        return None, []
+    try:
+        today = date.today()
+        articles = fetch_newsapi(query, from_date=today - timedelta(days=3), to_date=today)
+        store_headlines(articles, query)
+        headlines = [a.get("title", "") + " " + (a.get("description") or "") for a in articles]
+        result = score_headlines(ticker, headlines)
+        return result.score, result.matched_themes
+    except Exception as exc:
+        logger.warning("Sentiment fetch failed for %s: %s", ticker, exc)
+        return None, []
+
+
 def run_daily_scan():
     logger.info("=== Daily scan starting ===")
     send_text("🔍 Trading Copilot", "Daily scan started")
@@ -59,7 +79,12 @@ def run_daily_scan():
             df = _fetch_df(ticker)
             if df.empty:
                 continue
-            opp = score_ticker(ticker, df, signals_cfg, swing_cfg)
+            sentiment_score, sentiment_themes = _fetch_sentiment(ticker)
+            opp = score_ticker(
+                ticker, df, signals_cfg, swing_cfg,
+                sentiment_score=sentiment_score,
+                sentiment_themes=sentiment_themes,
+            )
             if opp is None or opp.conviction < conviction_threshold:
                 continue
 
