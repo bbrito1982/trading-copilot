@@ -34,6 +34,12 @@ def save_opportunity(opp: SignalOpportunity, db_engine=None) -> Opportunity:
     return record
 
 
+def get_opportunity(opportunity_id: str, db_engine=None) -> Opportunity | None:
+    engine = db_engine or get_engine()
+    with Session(engine) as session:
+        return session.get(Opportunity, opportunity_id)
+
+
 def enter_position(
     opportunity_id: str,
     entry_price: float | None = None,

@@ -11,6 +11,7 @@ from trading_copilot.tracker.positions import (
     skip_opportunity,
     close_position,
     get_open_positions,
+    get_opportunity,
 )
 from trading_copilot.notifications.ntfy import send_text
 
@@ -22,12 +23,19 @@ app = FastAPI(title="Trading Copilot Webhook")
 @app.post("/enter")
 async def enter(opportunity_id: str = Query(...)):
     """Called when user taps 'Enter' on a signal notification."""
-    pos = enter_position(opportunity_id)
-    if not pos:
+    opp = get_opportunity(opportunity_id)
+    if not opp:
         raise HTTPException(status_code=404, detail="Opportunity not found")
+    pos = enter_position(opportunity_id)
     send_text(
-        title=f"✅ Position opened: {pos.ticker}",
-        body=f"Entered {pos.ticker} @ ${pos.entry_price:.2f}  |  Position ID: {pos.id}",
+        title=f"Position opened: {opp.ticker} {opp.direction.upper()}",
+        body=(
+            f"Entry:  ${opp.entry_price:.2f}\n"
+            f"Stop:   ${opp.stop_loss:.2f}\n"
+            f"Target: ${opp.target:.2f}\n"
+            f"Conviction: {opp.conviction * 100:.0f}%"
+        ),
+        priority="high",
     )
     logger.info("Entered position %s via webhook", pos.id)
     return {"status": "ok", "position_id": pos.id}
@@ -39,6 +47,11 @@ async def skip(opportunity_id: str = Query(...)):
     ok = skip_opportunity(opportunity_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Opportunity not found")
+    send_text(
+        title="Signal skipped",
+        body="Opportunity marked as skipped.",
+        priority="low",
+    )
     return {"status": "skipped"}
 
 
@@ -51,12 +64,19 @@ async def exit_position(
     pos = close_position(position_id, exit_price=price, exit_reason="manual")
     if not pos:
         raise HTTPException(status_code=404, detail="Position not found or already closed")
-    sign = "+" if (pos.pnl_pct or 0) >= 0 else ""
+    pnl = pos.pnl_pct or 0.0
+    sign = "+" if pnl >= 0 else ""
+    emoji = "UP" if pnl >= 0 else "DOWN"
     send_text(
-        title=f"{'🟢' if (pos.pnl_pct or 0) >= 0 else '🔴'} Position closed: {pos.ticker}",
-        body=f"Exited {pos.ticker} @ ${pos.exit_price:.2f}  |  P&L: {sign}{pos.pnl_pct:.1f}%",
+        title=f"Position closed: {pos.ticker}  {sign}{pnl:.1f}%",
+        body=(
+            f"Exit:  ${pos.exit_price:.2f}\n"
+            f"Entry: ${pos.entry_price:.2f}\n"
+            f"P&L:   {sign}{pnl:.1f}%  ({emoji})"
+        ),
+        priority="high",
     )
-    return {"status": "closed", "pnl_pct": pos.pnl_pct}
+    return {"status": "closed", "pnl_pct": pnl}
 
 
 @app.get("/positions")

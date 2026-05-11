@@ -10,6 +10,12 @@ watchlist:
   - TLT
   - XLE
   - XLF
+  - IDVY
+  - IGLN
+  - JEDI
+  - WQTM
+  - RBOT
+  - EURN
 
 # Signals fire when conviction >= this threshold (0-1).
 # Conviction = sum(weight * signal_strength). Because signal strengths are
