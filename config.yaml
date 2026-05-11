@@ -1,0 +1,51 @@
+watchlist:
+  - AAPL
+  - MSFT
+  - GOOGL
+  - AMZN
+  - NVDA
+  - SPY
+  - QQQ
+  - GLD
+  - TLT
+  - XLE
+  - XLF
+
+# Signals fire when conviction >= this threshold (0-1)
+conviction_threshold: 0.6
+
+# Universe screener: suggest watchlist additions above this score
+discovery_threshold: 0.7
+
+signals:
+  rsi:
+    period: 14
+    oversold: 30
+    overbought: 70
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+  ma_crossover:
+    fast: 20
+    slow: 50
+  volume_spike:
+    # multiplier vs 20-day average
+    threshold: 2.0
+
+swing:
+  # Expected hold period in trading days
+  hold_days: 10
+  # Stop loss as % below entry
+  stop_loss_pct: 0.05
+  # Take profit as % above entry
+  take_profit_pct: 0.12
+
+scheduler:
+  # Cron expression for daily scan (UTC)
+  scan_cron: "30 11 * * 1-5"   # 11:30 UTC = ~6:30 AM ET before open
+  monitor_cron: "0 21 * * 1-5" # 21:00 UTC = ~4:00 PM ET after close
+
+notifications:
+  # Chart look-back window in days
+  chart_lookback_days: 90

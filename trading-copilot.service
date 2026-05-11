@@ -1,0 +1,22 @@
+[Unit]
+Description=Trading Copilot — swing trading assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/projects/trading-copilot
+ExecStart=/home/ubuntu/projects/trading-copilot/.venv/bin/python -m trading_copilot.scheduler
+Restart=on-failure
+RestartSec=10
+
+# Environment file for API keys
+EnvironmentFile=/home/ubuntu/projects/trading-copilot/.env
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-copilot
+
+[Install]
+WantedBy=multi-user.target
