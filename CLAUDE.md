@@ -76,6 +76,19 @@ Discovery threshold for universe screener suggestions: `discovery_threshold` (de
 
 ### Planned phases
 
-- **Phase 2**: `signals/ml/` — scikit-learn classifier trained on `opportunities` table outcomes
-- **Phase 3**: `sentiment/` — ticker-contextualized news scoring (same headline → different effect per asset via `tagger.py` lookup table, then learned embeddings)
-- **Phase 4**: Ensemble combining all signal layers
+**Phase 2 — Backtest engine**
+Build `backtest/engine.py`: replay DuckDB OHLCV day-by-day, apply current signal rules as if live, simulate entries/exits, output metrics (Sharpe, CAGR, max drawdown, win rate, expectancy). Entry point: `scripts/run_backtest.py --strategy rsi_macd --from 2020-01-01`. Required before ML — validates that signals have a historical edge and allows threshold tuning with evidence.
+
+**Phase 2b — ML signal layer**
+Train a scikit-learn classifier in `signals/ml/` that predicts 5–10 day return direction using rule-based indicators as features. Labels come from the `opportunities` table (live outcomes) + historical backfill. Replaces hard-coded conviction weights with learned ones.
+
+**Phase 3 — News/sentiment pipeline**
+- Backfill headlines from GDELT aligned with historical price moves → auto-labeled `(headline, ticker, outcome)` training set
+- `sentiment/tagger.py`: lookup table mapping macro entities (Hormuz, Fed rate hike, oil supply, etc.) to per-ticker directional effects — same headline can be bullish for one asset and bearish for another
+- Integrate sentiment score into daily scan alongside rule signals
+
+**Phase 3b — Learned ticker-contextualized embeddings**
+Upgrade `sentiment/tagger.py` lookup table to a sentence-transformer model trained on `(headline_embedding ⊕ ticker_embedding) → price_direction`. Training data from GDELT backfill. Captures non-obvious correlations the lookup table misses.
+
+**Phase 4 — Ensemble**
+Meta-model in `signals/ensemble.py` taking rule conviction + ML score + sentiment score as inputs, outputting a single weighted conviction score. Trained on the full `opportunities` outcome history.
