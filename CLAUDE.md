@@ -46,7 +46,7 @@ uv run python scripts/train_ensemble.py --watchlist --from 2018-01-01
 
 ## Architecture
 
-The system is a swing trading assistant that scans stocks/ETFs for signals, sends rich notifications (chart image + action buttons) via ntfy, and tracks entered positions through to exit.
+The system is a swing trading assistant that scans stocks/ETFs for signals, monitors breaking financial news in real time, sends push notifications via ntfy with Enter/Skip action buttons, and tracks entered positions through to exit.
 
 ### Data flow
 
@@ -55,18 +55,25 @@ APScheduler (scheduler.py)
   ├── Daily scan (6:30 AM ET)
   │     ├── tiingo.py → DuckDB cache (OHLCV)
   │     ├── news.py → NewsAPI headlines (last 3 days)
-  │     ├── sentiment/tagger.py → macro theme score per ticker
+  │     ├── sentiment/tagger.py → ticker + macro sentiment, blended
   │     ├── signals/rules.py → RSI, MACD, MA crossover, volume spike
   │     ├── signals/scorer.py → conviction (ensemble > ML > rule-based)
   │     │     ├── signals/ml/predictor.py → P(profitable) from GradientBoosting
   │     │     └── signals/ensemble.py → meta-model blend of all three layers
-  │     ├── notifications/charts.py → mplfinance PNG
+  │     ├── notifications/charts.py → mplfinance PNG (daily candles)
   │     └── notifications/ntfy.py → push alert with Enter/Skip buttons
+  ├── Breaking news monitor (every 5 min, market hours only)
+  │     ├── news/rss.py → RSSPoller polls 6 RSS feeds, deduplicates by URL hash
+  │     ├── news/breaking.py → scores each item with neural embedder
+  │     │     ├── if |score| ≥ 0.35 → fetch intraday 5-min bars (data/intraday.py)
+  │     │     ├── run signal scorer on intraday bars
+  │     │     └── if conviction ≥ 0.4 → generate intraday chart + ntfy alert
+  │     └── notifications/charts.py → generate_intraday_chart() (5-min candles, EMA9/20)
   └── Position monitor (4 PM ET after close)
         ├── tracker/positions.py → check stop/target/reversal
         └── ntfy exit alert with Confirm button
 
-FastAPI webhook (api/webhook.py) — receives ntfy button callbacks
+FastAPI webhook (api/webhook.py) — receives ntfy button callbacks via nginx → port 8000
   ├── POST /enter?opportunity_id=X  → creates Position in SQLite
   ├── POST /skip?opportunity_id=X   → marks Opportunity skipped
   └── POST /exit?position_id=X&price=Y → closes Position, records P&L
@@ -94,12 +101,19 @@ Backtest baseline (2025 out-of-sample, ML trained on 2018–2024): Sharpe 0.44, 
 
 ### Configuration
 
-- `config.yaml` — watchlist, signal parameters, scheduler cron times, swing trade percentages
-- `.env` — API keys (Tiingo, NewsAPI), ntfy topic, webhook base URL, DB paths
+- `config.yaml` — watchlist, signal parameters, scheduler cron times, swing trade percentages, `breaking_conviction_threshold` (default 0.4)
+- `.env` — API keys (Tiingo, NewsAPI), ntfy topic, `WEBHOOK_BASE_URL=http://143.47.48.68` (nginx proxies port 80 → 8000), DB paths
 - `data/ml_signal_model.joblib` — trained ML model (gitignored)
 - `data/ensemble_model.joblib` — trained ensemble model (gitignored)
 - `data/fnspid_sentiment.parquet` — FNSPID-derived sentiment cache (gitignored)
 - `data/fnspid_cache/` — raw FNSPID downloads: `news_small.csv`, `full_history.zip`, `prices.parquet` (gitignored)
+
+### Networking
+
+- nginx listens on port 80, proxies to uvicorn on port 8000
+- nginx config: `/etc/nginx/sites-available/trading-copilot` (server_name `143.47.48.68`)
+- ntfy button callbacks POST to `http://143.47.48.68/enter` and `/skip` — confirmed working
+- ntfy notifications: text-only (no inline images on iOS ntfy app); action buttons use structured JSON actions list
 
 ### Completed phases
 
@@ -108,20 +122,42 @@ Backtest baseline (2025 out-of-sample, ML trained on 2018–2024): Sharpe 0.44, 
 **Phase 2b — ML signal layer** ✓ (`signals/ml/features.py`, `trainer.py`, `predictor.py`, `scripts/train_ml.py`)  
 **Phase 3 — Sentiment pipeline** ✓ (`sentiment/tagger.py`, 13 macro themes, NewsAPI integration, veto mechanism)  
 **Phase 4 — Ensemble** ✓ (`signals/ensemble.py`, `scripts/train_ensemble.py`)  
-**Phase 4b — FNSPID historical sentiment** ✓ (`scripts/prepare_fnspid.py`, ensemble patched to accept `--sentiment-cache`)
+**Phase 4b — FNSPID historical sentiment** ✓ (`scripts/prepare_fnspid.py`, ensemble patched to accept `--sentiment-cache`)  
+**Phase 3b — Neural sentiment embedder** ✓ (`sentiment/embedder.py`, `scripts/train_embedder.py`, `score_headlines_neural()` with keyword fallback; `prepare_fnspid.py` now also outputs `fnspid_headlines.parquet`)  
+**Phase 5 — Breaking news monitor** ✓ (`news/rss.py`, `news/breaking.py`, `data/intraday.py`; 5-min APScheduler job, intraday chart generation, ntfy alerts with working Enter/Skip buttons)
 
 ### FNSPID integration — conclusions
 
 - **Dataset**: `Zihan1004/FNSPID` on HuggingFace. Used `All_external.csv` (5.7 GB). License: CC BY-NC-4.0 (personal use only).
-- **Pipeline**: `scripts/prepare_fnspid.py --watchlist --small` streams the CSV in 50k-row chunks (RAM-safe), extracts per-ticker price history from the zip, scores headlines with the existing keyword tagger, and saves `data/fnspid_sentiment.parquet`.
+- **Pipeline**: `scripts/prepare_fnspid.py --watchlist --small` streams the CSV in 50k-row chunks (RAM-safe), extracts per-ticker price history from the zip, scores headlines with the existing keyword tagger, and saves `data/fnspid_sentiment.parquet` + `data/fnspid_headlines.parquet` (raw headlines for neural training).
 - **Retrain**: `scripts/train_ensemble.py --watchlist --sentiment-cache data/fnspid_sentiment.parquet`
 - **Results**: Ensemble CV ROC-AUC 0.789. Sentiment weight went from 0 → 0.13 (non-zero for first time). Backtest unchanged: Sharpe 0.44, win rate 50%, expectancy 0.63%, max drawdown 3%.
-- **Why no backtest improvement**: The keyword tagger achieves only 3.9% directional agreement with 10-day returns on FNSPID headlines — too noisy to move the needle with a 0.13 weight over 22 trades. The infrastructure is now in place; improvement requires Phase 3b.
+- **Why no backtest improvement**: The keyword tagger achieves only 3.9% directional agreement with 10-day returns on FNSPID headlines — too noisy to move the needle with a 0.13 weight over 22 trades.
+
+### Phase 3b — Neural embedder workflow
+
+```bash
+# 1. Re-run prepare_fnspid (now also outputs fnspid_headlines.parquet)
+uv run python scripts/prepare_fnspid.py --watchlist --small --skip-download
+
+# 2. Train neural embedder (requires sentence-transformers + torch)
+uv pip install -e ".[sentiment]"
+uv run python scripts/train_embedder.py --headlines data/fnspid_headlines.parquet
+
+# 3. Retrain ensemble (sentiment scores unchanged, but live scoring now uses neural)
+uv run python scripts/train_ensemble.py --watchlist --from 2018-01-01 \
+  --sentiment-cache data/fnspid_sentiment.parquet
+```
+
+The scheduler auto-uses the neural embedder when `data/sentiment_embedder.pt` exists; falls back to keyword tagger otherwise.
 
 ### Remaining phases
 
-**Phase 3b — Learned ticker-contextualized embeddings**
-Replace `sentiment/tagger.py` keyword matching with a sentence-transformer model trained on FNSPID `(headline_embedding ⊕ ticker_embedding) → price_direction`. Training data is now available via `prepare_fnspid.py`. The keyword tagger achieves only 3.9% directional agreement; learned embeddings should improve this substantially and give the ensemble a meaningful sentiment weight.
-
-**Ensemble retraining (ongoing)**
+**Ensemble retraining (ongoing)**  
 Retrain periodically as live `Opportunity` records accumulate real sentiment scores and outcomes. Use `--sentiment-cache` to include FNSPID historical data alongside live data.
+
+**Possible next steps**
+- Web dashboard to view open positions, recent signals, and chart history
+- Persist intraday charts to disk and serve from FastAPI for richer notifications
+- Extend RSS feed list or add Alpaca news stream for lower-latency breaking news
+- Add position sizing logic (Kelly criterion or fixed fractional) to the opportunity output

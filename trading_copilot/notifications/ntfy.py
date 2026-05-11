@@ -9,6 +9,8 @@ import httpx
 from trading_copilot.config import settings
 from trading_copilot.signals.scorer import Opportunity
 
+# avoid circular import — NewsItem imported lazily inside send_breaking_news_alert
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,6 +93,36 @@ def send_discovery_alert(
     return _send_with_image(title, body, chart_png, priority="default")
 
 
+def send_breaking_news_alert(
+    item: "trading_copilot.news.rss.NewsItem",  # type: ignore[name-defined]
+    opportunity: Opportunity,
+    chart_png: bytes,
+    opportunity_id: str,
+) -> bool:
+    """Send a breaking news signal alert with intraday chart."""
+    from trading_copilot.news.rss import NewsItem  # noqa: F401  (type check only)
+
+    direction = opportunity.direction.upper()
+    emoji = "⚡📈" if opportunity.direction == "buy" else "⚡📉"
+    conviction_pct = f"{opportunity.conviction * 100:.0f}%"
+
+    title = f"{emoji} BREAKING: {opportunity.ticker} {direction}  [{conviction_pct}]"
+    body = (
+        f"News: {item.title[:120]}\n"
+        f"Entry: ${opportunity.entry_price:.2f}  "
+        f"Stop: ${opportunity.stop_loss:.2f}  "
+        f"Target: ${opportunity.target:.2f}"
+    )
+
+    webhook = settings.webhook_base_url.rstrip("/")
+    actions = (
+        f"http, Enter, {webhook}/enter?opportunity_id={opportunity_id}, clear=true; "
+        f"http, Skip, {webhook}/skip?opportunity_id={opportunity_id}, clear=true"
+    )
+
+    return _send_with_image(title, body, chart_png, actions, priority="urgent")
+
+
 def _json_post(payload: dict) -> bool:
     """POST JSON to the ntfy publish endpoint (handles Unicode natively)."""
     try:
@@ -123,33 +155,35 @@ def _priority_int(p: str) -> int:
 def _send_with_image(
     title: str,
     body: str,
-    image_png: bytes,
+    image_png: bytes,  # kept for API compatibility but not sent
     actions: str | None = None,
     priority: str = "default",
 ) -> bool:
-    # ntfy supports image attachments via PUT with headers
-    headers: dict[str, str] = {
-        "X-Topic": settings.ntfy_topic,
-        "X-Title": title,
-        "X-Message": body.replace("\n", " | "),
-        "X-Priority": str(_priority_int(priority)),
-        "X-Filename": "chart.png",
-        "Content-Type": "image/png",
+    """Send text notification with action buttons (image skipped — iOS renders none)."""
+    payload: dict = {
+        "topic": settings.ntfy_topic,
+        "title": title,
+        "message": body,
+        "priority": _priority_int(priority),
     }
     if actions:
-        headers["X-Actions"] = actions
+        action_list = []
+        for part in actions.split(";"):
+            parts = [p.strip() for p in part.strip().split(",")]
+            if len(parts) >= 3:
+                action_list.append({
+                    "action": parts[0],
+                    "label": parts[1],
+                    "url": parts[2],
+                    "clear": "clear=true" in part,
+                })
+        payload["actions"] = action_list
 
     try:
-        resp = httpx.put(
-            f"{_base_url()}/{settings.ntfy_topic}",
-            content=image_png,
-            headers=headers,
-            timeout=30,
-        )
+        resp = httpx.post(f"{_base_url()}/", json=payload, timeout=15)
         resp.raise_for_status()
         logger.info("ntfy alert sent: %s", title)
         return True
     except Exception as exc:
-        logger.error("ntfy image send failed: %s", exc)
-        # Fallback: text-only via JSON
+        logger.error("ntfy send failed: %s", exc)
         return send_text(title, body, priority)

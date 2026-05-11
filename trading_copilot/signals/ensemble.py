@@ -61,6 +61,7 @@ def _load_sentiment_cache(path: str | None) -> pd.DataFrame | None:
         return None
     df = pd.read_parquet(p)[["ticker", "date", "sentiment_score"]]
     df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+    df["sentiment_score"] = pd.to_numeric(df["sentiment_score"], errors="coerce").fillna(0.0)
     logger.info("Loaded sentiment cache: %d rows from %s", len(df), path)
     return df
 
@@ -211,18 +212,21 @@ def predict_ensemble(
     if bundle is None:
         return None
 
-    ml_conv = ml_conviction if ml_conviction is not None else 0.0
-    ml_avail = 1.0 if ml_conviction is not None else 0.0
+    ml_ok = ml_conviction is not None and not np.isnan(ml_conviction)
+    ml_conv = float(ml_conviction) if ml_ok else 0.0
+    ml_avail = 1.0 if ml_ok else 0.0
 
     direction_sign = 1.0 if direction == "buy" else -1.0
-    if sentiment_score is not None:
-        sent_aligned = sentiment_score * direction_sign
+    sent_ok = sentiment_score is not None and not np.isnan(sentiment_score)
+    if sent_ok:
+        sent_aligned = float(sentiment_score) * direction_sign
         sent_avail = 1.0
     else:
         sent_aligned = 0.0
         sent_avail = 0.0
 
-    vec = np.array([[rule_conviction, ml_conv, sent_aligned, ml_avail, sent_avail]], dtype=np.float32)
+    rule_conv = float(rule_conviction) if not np.isnan(rule_conviction) else 0.0
+    vec = np.array([[rule_conv, ml_conv, sent_aligned, ml_avail, sent_avail]], dtype=np.float32)
     try:
         return float(bundle["pipeline"].predict_proba(vec)[0][1])
     except Exception as exc:

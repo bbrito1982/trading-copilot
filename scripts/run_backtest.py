@@ -51,6 +51,9 @@ def _parse_date(ctx, param, value: str) -> date:
               help="Notional starting capital per ticker.")
 @click.option("--trades", "show_trades", is_flag=True, default=False,
               help="Print individual trade log after summary.")
+@click.option("--sentiment-cache", "sentiment_cache_path", default=None, metavar="PATH",
+              help="Parquet with (ticker, date, sentiment_score) to augment signals. "
+                   "Use data/fnspid_sentiment_neural.parquet for neural scores.")
 @click.option("--verbose", "-v", is_flag=True, default=False,
               help="Enable DEBUG logging.")
 def main(
@@ -61,6 +64,7 @@ def main(
     threshold: float | None,
     capital: float,
     show_trades: bool,
+    sentiment_cache_path: str | None,
     verbose: bool,
 ) -> None:
     logging.basicConfig(
@@ -101,6 +105,19 @@ def main(
         console.print("[red]No data loaded. Aborting.[/red]")
         raise SystemExit(1)
 
+    # Load optional sentiment cache
+    sentiment_cache = None
+    if sentiment_cache_path:
+        import pandas as pd
+        sp = Path(sentiment_cache_path)
+        if not sp.exists():
+            console.print(f"[red]Sentiment cache not found: {sp}[/red]")
+            raise SystemExit(1)
+        sentiment_cache = pd.read_parquet(sp)
+        sentiment_cache["date"] = pd.to_datetime(sentiment_cache["date"])
+        sentiment_cache["ticker"] = sentiment_cache["ticker"].str.upper()
+        console.print(f"  Sentiment cache  : {sp} ({len(sentiment_cache):,} rows)\n")
+
     console.print("\nRunning simulation …\n")
 
     try:
@@ -111,6 +128,7 @@ def main(
             swing_cfg=swing_cfg,
             conviction_threshold=conviction_threshold,
             starting_capital=capital,
+            sentiment_cache=sentiment_cache,
         )
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")

@@ -53,6 +53,7 @@ _NEWS_CACHE_LARGE = _CACHE_DIR / "news_large.csv"
 _NEWS_CACHE_SMALL = _CACHE_DIR / "news_small.csv"
 _PRICE_CACHE = _CACHE_DIR / "prices.parquet"
 OUTPUT_PATH = Path("data/fnspid_sentiment.parquet")
+HEADLINES_PATH = Path("data/fnspid_headlines.parquet")
 
 FORWARD_DAYS = 10
 CHUNK_SIZE = 1 << 20  # 1 MB
@@ -233,9 +234,16 @@ def _build_sentiment_cache(
     news: pd.DataFrame,
     prices: pd.DataFrame,
     tickers: list[str],
-) -> pd.DataFrame:
-    """For each (ticker, date) with headlines, score sentiment and attach 10-day label."""
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """For each (ticker, date) with headlines, score sentiment and attach 10-day label.
+
+    Returns (sentiment_df, headlines_df) where headlines_df stores raw headline
+    lists as JSON strings for neural embedder training.
+    """
+    import json
+
     records: list[dict] = []
+    headline_records: list[dict] = []
 
     for ticker in tickers:
         tn = news[news["ticker"] == ticker]
@@ -256,16 +264,27 @@ def _build_sentiment_cache(
                 "matched_themes": ",".join(result.matched_themes),
                 "headline_count": result.headline_count,
                 "fwd_return_10d": fwd,
-                # Binary label: sentiment direction agrees with price direction
                 "label": (
                     int((result.score > 0 and fwd > 0) or (result.score < 0 and fwd < 0))
                     if fwd is not None else None
                 ),
             })
+            headline_records.append({
+                "ticker": ticker,
+                "date": signal_date,
+                "headlines_json": json.dumps(headlines),
+                "fwd_return_10d": fwd,
+                # Binary direction label: 1 = price went up, 0 = down
+                "label": int(fwd > 0) if fwd is not None else None,
+            })
 
-    df = pd.DataFrame(records)
-    df["date"] = pd.to_datetime(df["date"])
-    return df
+    sentiment_df = pd.DataFrame(records)
+    sentiment_df["date"] = pd.to_datetime(sentiment_df["date"])
+
+    headlines_df = pd.DataFrame(headline_records)
+    headlines_df["date"] = pd.to_datetime(headlines_df["date"])
+
+    return sentiment_df, headlines_df
 
 
 # ---------------------------------------------------------------------------
@@ -330,23 +349,30 @@ def main(start, tickers, watchlist, skip_download, small, output, verbose):
         raise SystemExit(1)
 
     console.print("\n[bold]Step 3 — Score sentiment[/bold]")
-    cache = _build_sentiment_cache(news, prices, ticker_list)
+    cache, headlines_df = _build_sentiment_cache(news, prices, ticker_list)
 
     out = Path(output)
     out.parent.mkdir(parents=True, exist_ok=True)
     cache.to_parquet(out, index=False)
+
+    hl_out = out.parent / HEADLINES_PATH.name
+    headlines_df.to_parquet(hl_out, index=False)
 
     # Summary
     total = len(cache)
     with_label = cache["label"].notna().sum()
     agree = cache.dropna(subset=["label"])["label"].mean()
     console.print(f"\n[green]✓ Sentiment cache saved → {out}[/green]")
+    console.print(f"[green]✓ Headlines cache saved → {hl_out}[/green]")
     console.print(f"  Total rows       : {total:,}")
     console.print(f"  Rows with label  : {with_label:,}")
     console.print(f"  Directional agree: {agree:.1%}" if with_label else "  (no labels)")
     console.print(
-        "\nNext: retrain the ensemble to activate sentiment weight:\n"
-        "  uv run python scripts/train_ensemble.py --watchlist --from 2018-01-01 "
+        "\nNext steps:\n"
+        "  1. Train neural sentiment embedder:\n"
+        f"     uv run python scripts/train_embedder.py --headlines {hl_out}\n"
+        "  2. Retrain ensemble:\n"
+        "     uv run python scripts/train_ensemble.py --watchlist --from 2018-01-01 "
         f"--sentiment-cache {out}\n"
     )
 

@@ -44,6 +44,30 @@ class _OpenPosition:
     hold_days: int      # max days to hold
 
 
+def _lookup_sentiment(
+    sentiment_cache: "pd.DataFrame | None",
+    ticker: str,
+    bar_date: date,
+    window_days: int = 3,
+) -> "float | None":
+    """Return the most recent sentiment score for ticker on or before bar_date.
+
+    Looks back up to window_days to handle weekends / sparse news coverage.
+    """
+    if sentiment_cache is None:
+        return None
+    ts = pd.Timestamp(bar_date)
+    mask = (
+        (sentiment_cache["ticker"] == ticker)
+        & (sentiment_cache["date"] <= ts)
+        & (sentiment_cache["date"] >= ts - pd.Timedelta(days=window_days))
+    )
+    rows = sentiment_cache.loc[mask]
+    if rows.empty:
+        return None
+    return float(rows.sort_values("date").iloc[-1]["sentiment_score"])
+
+
 def _simulate_ticker(
     ticker: str,
     df: pd.DataFrame,
@@ -51,6 +75,7 @@ def _simulate_ticker(
     swing_cfg: dict,
     conviction_threshold: float,
     starting_capital: float,
+    sentiment_cache: "pd.DataFrame | None" = None,
 ) -> TickerResult:
     """Simulate signal detection and position management for one ticker."""
     hold_days = swing_cfg.get("hold_days", 10)
@@ -120,7 +145,8 @@ def _simulate_ticker(
 
         # --- Look for new entry ---
         if open_pos is None:
-            opp = score_ticker(ticker, window, cfg, swing_cfg)
+            sentiment_score = _lookup_sentiment(sentiment_cache, ticker, bar_date)
+            opp = score_ticker(ticker, window, cfg, swing_cfg, sentiment_score=sentiment_score)
             if opp is not None and opp.conviction >= conviction_threshold:
                 open_pos = _OpenPosition(
                     ticker=ticker,
@@ -176,6 +202,7 @@ def run_backtest(
     swing_cfg: dict | None = None,
     conviction_threshold: float = 0.6,
     starting_capital: float = 10_000.0,
+    sentiment_cache: "pd.DataFrame | None" = None,
 ) -> BacktestResult:
     """Run a walk-forward backtest over pre-loaded OHLCV data.
 
@@ -193,6 +220,10 @@ def run_backtest(
         Minimum conviction to open a position (0–1).
     starting_capital:
         Notional capital per ticker (used only to compute equity curves).
+    sentiment_cache:
+        Optional DataFrame with columns (ticker, date, sentiment_score).
+        When provided, each bar's entry signal is augmented with the most
+        recent sentiment score from this cache (look-back window: 3 days).
     """
     swing = swing_cfg or {}
     ticker_results: dict[str, TickerResult] = {}
@@ -204,7 +235,8 @@ def run_backtest(
             continue
         logger.info("Backtesting %s (%d bars) …", ticker, len(df))
         ticker_results[ticker] = _simulate_ticker(
-            ticker, df, cfg, swing, conviction_threshold, starting_capital
+            ticker, df, cfg, swing, conviction_threshold, starting_capital,
+            sentiment_cache=sentiment_cache,
         )
 
     if not ticker_results:

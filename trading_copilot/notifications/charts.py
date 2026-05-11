@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import io
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import matplotlib
 matplotlib.use("Agg")
@@ -132,6 +132,84 @@ def generate_chart(
             idx = ohlcv.index.get_loc(entry_dt)
             ax.axvline(x=idx, color="#FFD700", linewidth=1.5, linestyle="--", alpha=0.8)
             ax.axhline(y=entry_price, color="#FFD700", linewidth=1, linestyle=":", alpha=0.6)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight", facecolor="#1a1a2e")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
+def generate_intraday_chart(
+    ticker: str,
+    df: pd.DataFrame,
+    opportunity: "Opportunity | None" = None,
+    last_n_bars: int = 78,
+) -> bytes:
+    """Return PNG bytes for a 5-min intraday candlestick chart."""
+    ohlcv = df.copy()
+    ohlcv["date"] = pd.to_datetime(ohlcv["date"])
+    ohlcv = ohlcv.set_index("date").sort_index()
+    ohlcv = ohlcv.rename(columns={
+        "adj_open": "Open", "adj_high": "High",
+        "adj_low": "Low", "adj_close": "Close", "volume": "Volume",
+    })
+    for col, fallback in [("Open", "open"), ("High", "high"), ("Low", "low"), ("Close", "close")]:
+        if col not in ohlcv.columns and fallback in ohlcv.columns:
+            ohlcv[col] = ohlcv[fallback]
+
+    ohlcv = ohlcv[["Open", "High", "Low", "Close", "Volume"]].tail(last_n_bars)
+
+    # Simple 9-bar and 20-bar EMAs for intraday context
+    ema9 = ohlcv["Close"].ewm(span=9, adjust=False).mean()
+    ema20 = ohlcv["Close"].ewm(span=20, adjust=False).mean()
+    add_plots = [
+        mpf.make_addplot(ema9, color="#2196F3", width=1.0, label="EMA9"),
+        mpf.make_addplot(ema20, color="#FF9800", width=1.0, label="EMA20"),
+    ]
+
+    hlines_kwargs: dict = {}
+    if opportunity:
+        hlines_kwargs = {
+            "hlines": [opportunity.stop_loss, opportunity.target],
+            "hline_colors": ["#F44336", "#4CAF50"],
+            "hline_styles": ["--", "--"],
+            "hline_widths": [1, 1],
+        }
+
+    style = mpf.make_mpf_style(
+        base_mpf_style="nightclouds",
+        gridstyle=":",
+        gridcolor="#333333",
+        facecolor="#1a1a2e",
+        figcolor="#1a1a2e",
+        edgecolor="#444444",
+    )
+
+    direction_label = ""
+    if opportunity:
+        direction_label = "  ▲ BUY" if opportunity.direction == "buy" else "  ▼ SELL"
+        direction_label += f"  {opportunity.conviction * 100:.0f}% conviction"
+    title = f"{ticker} (5-min intraday){direction_label}"
+
+    fig, axes = mpf.plot(
+        ohlcv,
+        type="candle",
+        style=style,
+        title=title,
+        volume=True,
+        addplot=add_plots,
+        panel_ratios=(4, 1),
+        figsize=(12, 6),
+        tight_layout=True,
+        returnfig=True,
+    )
+
+    # Draw stop/target lines manually to avoid mplfinance kwarg version issues
+    if opportunity:
+        ax = axes[0]
+        ax.axhline(opportunity.stop_loss, color="#F44336", linewidth=1, linestyle="--", alpha=0.8)
+        ax.axhline(opportunity.target, color="#4CAF50", linewidth=1, linestyle="--", alpha=0.8)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=120, bbox_inches="tight", facecolor="#1a1a2e")

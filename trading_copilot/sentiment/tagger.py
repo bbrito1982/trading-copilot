@@ -239,6 +239,58 @@ class SentimentResult:
     headline_count: int
 
 
+def score_macro_headlines(headlines: list[str], tickers: list[str]) -> dict[str, float]:
+    """Apply generic financial headlines to all tickers using the theme effects table.
+
+    Macro headlines (Fed decisions, inflation prints, geopolitical events) affect
+    every ticker differently according to the theme→ticker effects table. This is
+    the right tool for market-wide news; use score_headlines_neural() for
+    company-specific news.
+
+    Returns a dict of ticker → score in [-1, +1], omitting tickers with zero effect.
+    """
+    result = {}
+    for ticker in tickers:
+        r = score_headlines(ticker, headlines)
+        if r.score != 0.0:
+            result[ticker] = r.score
+    return result
+
+
+def blend_sentiment(ticker_score: float | None, macro_score: float | None,
+                    ticker_weight: float = 0.6) -> float | None:
+    """Blend ticker-specific and macro sentiment scores.
+
+    If only one source is available, returns it directly (no blending penalty).
+    """
+    if ticker_score is not None and macro_score is not None:
+        return round(ticker_weight * ticker_score + (1 - ticker_weight) * macro_score, 4)
+    return ticker_score if ticker_score is not None else macro_score
+
+
+def score_headlines_neural(ticker: str, headlines: list[str]) -> SentimentResult:
+    """Score headlines using the trained neural embedder (Phase 3b).
+
+    Falls back to keyword tagger if the embedder model is not available.
+    """
+    from trading_copilot.sentiment.embedder import load_embedder, embedder_exists
+
+    if not embedder_exists():
+        return score_headlines(ticker, headlines)
+
+    embedder = load_embedder()
+    if embedder is None:
+        return score_headlines(ticker, headlines)
+
+    score = embedder.predict_score(ticker, headlines)
+    return SentimentResult(
+        ticker=ticker,
+        score=score,
+        matched_themes=["neural"],
+        headline_count=len(headlines),
+    )
+
+
 def score_headlines(ticker: str, headlines: list[str]) -> SentimentResult:
     """Score a list of headline strings for a given ticker.
 

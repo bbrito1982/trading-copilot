@@ -14,7 +14,7 @@ from trading_copilot.config import config, settings
 from trading_copilot.data.tiingo import get_ohlcv, get_ohlcv_cached_only
 from trading_copilot.data.news import fetch_newsapi, store_headlines
 from trading_copilot.data.universe import FULL_UNIVERSE
-from trading_copilot.sentiment.tagger import TICKER_QUERIES, score_headlines
+from trading_copilot.sentiment.tagger import TICKER_QUERIES, score_headlines, score_headlines_neural, score_macro_headlines, blend_sentiment
 from trading_copilot.notifications.charts import generate_chart
 from trading_copilot.notifications.ntfy import (
     send_discovery_alert,
@@ -42,6 +42,7 @@ notif_cfg = config.get("notifications", {})
 chart_lookback = notif_cfg.get("chart_lookback_days", 90)
 conviction_threshold = config.get("conviction_threshold", 0.6)
 discovery_threshold = config.get("discovery_threshold", 0.7)
+breaking_conviction_threshold = config.get("breaking_conviction_threshold", 0.4)
 watchlist: list[str] = config.get("watchlist", [])
 
 
@@ -51,19 +52,67 @@ def _fetch_df(ticker: str, days: int = 200):
     return get_ohlcv(ticker, start=start, end=end)
 
 
+_macro_headlines_cache: list[str] | None = None
+
+def _fetch_macro_headlines() -> list[str]:
+    """Fetch market-wide macro headlines once per scan and cache for the session."""
+    global _macro_headlines_cache
+    if _macro_headlines_cache is not None:
+        return _macro_headlines_cache
+    if not settings.news_api_key:
+        _macro_headlines_cache = []
+        return []
+    macro_query = (
+        "Federal Reserve interest rates inflation recession GDP "
+        "oil price OPEC dollar treasury bonds market crash rally"
+    )
+    try:
+        from datetime import date, timedelta
+        today = date.today()
+        articles = fetch_newsapi(macro_query, from_date=today - timedelta(days=3), to_date=today)
+        store_headlines(articles, macro_query)
+        _macro_headlines_cache = [
+            a.get("title", "") + " " + (a.get("description") or "") for a in articles
+        ]
+        logger.info("Macro headlines fetched: %d articles", len(_macro_headlines_cache))
+    except Exception as exc:
+        logger.warning("Macro headlines fetch failed: %s", exc)
+        _macro_headlines_cache = []
+    return _macro_headlines_cache
+
+
 def _fetch_sentiment(ticker: str) -> tuple[float | None, list[str]]:
-    """Fetch last 3 days of headlines and return (sentiment_score, themes)."""
+    """Fetch ticker-specific + macro headlines, blend, return (sentiment_score, themes)."""
     from datetime import date, timedelta
     query = TICKER_QUERIES.get(ticker)
-    if not query or not settings.news_api_key:
+    if not settings.news_api_key:
         return None, []
     try:
         today = date.today()
-        articles = fetch_newsapi(query, from_date=today - timedelta(days=3), to_date=today)
-        store_headlines(articles, query)
-        headlines = [a.get("title", "") + " " + (a.get("description") or "") for a in articles]
-        result = score_headlines(ticker, headlines)
-        return result.score, result.matched_themes
+
+        # Ticker-specific score (neural)
+        ticker_score: float | None = None
+        themes: list[str] = []
+        if query:
+            articles = fetch_newsapi(query, from_date=today - timedelta(days=3), to_date=today)
+            store_headlines(articles, query)
+            headlines = [a.get("title", "") + " " + (a.get("description") or "") for a in articles]
+            result = score_headlines_neural(ticker, headlines)
+            ticker_score = result.score if headlines else None
+            themes = result.matched_themes
+
+        # Macro score (keyword theme table applied to market-wide headlines)
+        macro_score: float | None = None
+        macro_headlines = _fetch_macro_headlines()
+        if macro_headlines:
+            macro_scores = score_macro_headlines(macro_headlines, [ticker])
+            macro_score = macro_scores.get(ticker)
+
+        blended = blend_sentiment(ticker_score, macro_score, ticker_weight=0.6)
+        if macro_score is not None and blended != ticker_score:
+            themes = list(set(themes + ["macro"]))
+
+        return blended, themes
     except Exception as exc:
         logger.warning("Sentiment fetch failed for %s: %s", ticker, exc)
         return None, []
@@ -164,6 +213,14 @@ def run_position_monitor():
 def main():
     create_tables()
 
+    from trading_copilot.news.breaking import BreakingNewsMonitor
+    breaking_monitor = BreakingNewsMonitor(
+        watchlist=watchlist,
+        signals_cfg=signals_cfg,
+        swing_cfg=swing_cfg,
+        conviction_threshold=breaking_conviction_threshold,
+    )
+
     scheduler = BackgroundScheduler(timezone="UTC")
     scan_cron = config.get("scheduler", {}).get("scan_cron", "30 11 * * 1-5")
     monitor_cron = config.get("scheduler", {}).get("monitor_cron", "0 21 * * 1-5")
@@ -181,6 +238,10 @@ def main():
         run_position_monitor, "cron",
         minute=monitor_parts[0], hour=monitor_parts[1], day_of_week=monitor_parts[4],
         id="position_monitor",
+    )
+    scheduler.add_job(
+        breaking_monitor.tick, "interval", minutes=5,
+        id="breaking_news",
     )
 
     scheduler.start()
