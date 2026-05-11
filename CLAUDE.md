@@ -74,9 +74,9 @@ APScheduler (scheduler.py)
         └── ntfy exit alert with Confirm button
 
 FastAPI webhook (api/webhook.py) — receives ntfy button callbacks via nginx → port 8000
-  ├── POST /enter?opportunity_id=X  → creates Position in SQLite
-  ├── POST /skip?opportunity_id=X   → marks Opportunity skipped
-  └── POST /exit?position_id=X&price=Y → closes Position, records P&L
+  ├── POST /enter?opportunity_id=X  → creates Position; sends confirmation ntfy (entry/stop/target)
+  ├── POST /skip?opportunity_id=X   → marks Opportunity skipped; sends "Signal skipped" ntfy
+  └── POST /exit?position_id=X&price=Y → closes Position, records P&L; sends P&L summary ntfy
 ```
 
 ### Storage
@@ -89,8 +89,8 @@ FastAPI webhook (api/webhook.py) — receives ntfy button callbacks via nginx �
 Conviction is computed in three layers; the highest available layer wins:
 
 1. **Rule-based** (`signals/rules.py` + `signals/scorer.py`) — RSI, MACD, MA crossover, volume spike. Requires ≥2 agreeing signals. Always available.
-2. **ML model** (`signals/ml/`) — GradientBoosting classifier trained on 21 indicator features predicting 10-day return direction. Trained via `scripts/train_ml.py`. CV ROC-AUC ~0.57–0.60.
-3. **Ensemble** (`signals/ensemble.py`) — Logistic regression meta-model blending rule + ML + sentiment. Trained via `scripts/train_ensemble.py`. CV ROC-AUC ~0.84. Improves as live outcome data accumulates.
+2. **ML model** (`signals/ml/`) — GradientBoosting classifier trained on 21 indicator features predicting 10-day return direction. Trained via `scripts/train_ml.py`. CV ROC-AUC 0.602 (trained on 17-ticker watchlist, 5835 samples).
+3. **Ensemble** (`signals/ensemble.py`) — Logistic regression meta-model blending rule + ML + sentiment. Trained via `scripts/train_ensemble.py`. CV ROC-AUC 0.787. ML conviction dominates (weight 1.27); retrain as live sentiment data accumulates.
 
 **Sentiment veto**: if macro sentiment strongly contradicts the technical direction (threshold 0.4), the opportunity is suppressed before reaching the user.
 
@@ -101,7 +101,7 @@ Backtest baseline (2025 out-of-sample, ML trained on 2018–2024): Sharpe 0.44, 
 
 ### Configuration
 
-- `config.yaml` — watchlist, signal parameters, scheduler cron times, swing trade percentages, `breaking_conviction_threshold` (default 0.4)
+- `config.yaml` — watchlist (17 tickers: US large-caps + IDVY, IGLN, JEDI, WQTM, RBOT, EURN), signal parameters, scheduler cron times, swing trade percentages, `breaking_conviction_threshold` (default 0.4)
 - `.env` — API keys (Tiingo, NewsAPI), ntfy topic, `WEBHOOK_BASE_URL=http://143.47.48.68` (nginx proxies port 80 → 8000), DB paths
 - `data/ml_signal_model.joblib` — trained ML model (gitignored)
 - `data/ensemble_model.joblib` — trained ensemble model (gitignored)
@@ -112,8 +112,15 @@ Backtest baseline (2025 out-of-sample, ML trained on 2018–2024): Sharpe 0.44, 
 
 - nginx listens on port 80, proxies to uvicorn on port 8000
 - nginx config: `/etc/nginx/sites-available/trading-copilot` (server_name `143.47.48.68`)
-- ntfy button callbacks POST to `http://143.47.48.68/enter` and `/skip` — confirmed working
-- ntfy notifications: text-only (no inline images on iOS ntfy app); action buttons use structured JSON actions list
+- ntfy button callbacks POST to `http://143.47.48.68/enter` and `/skip` — confirmed working from iOS
+- ntfy notifications: text-only (iOS ntfy app does not render inline images); action buttons use structured JSON actions list
+
+### Data sources
+
+- **Tiingo** — primary OHLCV source for US-listed tickers
+- **Yahoo Finance** (`yfinance`) — fallback for tickers Tiingo doesn't carry; triggered when Tiingo returns 404 or empty response
+- `YAHOO_FALLBACK` dict in `data/tiingo.py` maps watchlist tickers to their Yahoo symbols (e.g. `IGLN → IGLN.L`, `EURN → EURN.BR`)
+- To add a new non-US ticker: add it to `config.yaml` watchlist and add its Yahoo symbol to `YAHOO_FALLBACK`
 
 ### Completed phases
 
