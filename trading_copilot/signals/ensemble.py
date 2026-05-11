@@ -51,11 +51,26 @@ def _rule_conviction(signals) -> tuple[float, str]:
     return min(1.0, abs(raw)), direction
 
 
+def _load_sentiment_cache(path: str | None) -> pd.DataFrame | None:
+    """Return (ticker, date, sentiment_score) DataFrame or None."""
+    if path is None:
+        return None
+    p = Path(path)
+    if not p.exists():
+        logger.warning("Sentiment cache not found: %s", path)
+        return None
+    df = pd.read_parquet(p)[["ticker", "date", "sentiment_score"]]
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+    logger.info("Loaded sentiment cache: %d rows from %s", len(df), path)
+    return df
+
+
 def build_ensemble_dataset(
     ohlcv_data: dict[str, pd.DataFrame],
     cfg: dict,
     forward_days: int = 10,
     ml_model_path: str | None = None,
+    sentiment_cache_path: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate (X, y) for ensemble training from historical OHLCV."""
     from trading_copilot.signals.ml.predictor import predict_conviction, model_exists
@@ -65,6 +80,8 @@ def build_ensemble_dataset(
     has_ml = model_exists(model_path)
     if not has_ml:
         logger.warning("No ML model found at %s — ml_conviction will be 0", model_path)
+
+    sentiment_cache = _load_sentiment_cache(sentiment_cache_path)
 
     X_rows: list[list[float]] = []
     y_rows: list[int] = []
@@ -96,9 +113,20 @@ def build_ensemble_dataset(
                 ml_conv = 0.0
                 ml_avail = 0.0
 
-            # Sentiment unavailable for historical data — use 0
+            # Sentiment from FNSPID cache if available
             sentiment_aligned = 0.0
             sentiment_avail = 0.0
+            if sentiment_cache is not None:
+                signal_date = pd.Timestamp(dates[i])
+                row = sentiment_cache[
+                    (sentiment_cache["ticker"] == ticker) &
+                    (sentiment_cache["date"] == signal_date)
+                ]
+                if not row.empty:
+                    raw_score = float(row["sentiment_score"].iloc[0])
+                    direction_sign = 1.0 if direction == "buy" else -1.0
+                    sentiment_aligned = raw_score * direction_sign
+                    sentiment_avail = 1.0
 
             # Label: was the direction correct over forward_days?
             entry_price = float(window["adj_close"].iloc[-1])
@@ -130,9 +158,10 @@ def train_ensemble(
     forward_days: int = 10,
     ml_model_path: str | None = None,
     ensemble_path: str = DEFAULT_ENSEMBLE_PATH,
+    sentiment_cache_path: str | None = None,
 ) -> tuple[Pipeline, np.ndarray]:
     """Train and save the ensemble meta-model."""
-    X, y = build_ensemble_dataset(ohlcv_data, cfg, forward_days, ml_model_path)
+    X, y = build_ensemble_dataset(ohlcv_data, cfg, forward_days, ml_model_path, sentiment_cache_path)
 
     pipeline = Pipeline([
         ("scaler", StandardScaler()),

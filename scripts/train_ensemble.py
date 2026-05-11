@@ -41,8 +41,10 @@ def _parse_date(ctx, param, value: str) -> date:
 @click.option("--watchlist", is_flag=True, default=False)
 @click.option("--forward-days", default=10, show_default=True)
 @click.option("--ensemble-path", default=DEFAULT_ENSEMBLE_PATH, show_default=True)
+@click.option("--sentiment-cache", default=None, metavar="PATH",
+              help="Path to fnspid_sentiment.parquet produced by prepare_fnspid.py.")
 @click.option("--verbose", "-v", is_flag=True, default=False)
-def main(start, end, tickers, watchlist, forward_days, ensemble_path, verbose):
+def main(start, end, tickers, watchlist, forward_days, ensemble_path, sentiment_cache, verbose):
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
@@ -74,12 +76,15 @@ def main(start, end, tickers, watchlist, forward_days, ensemble_path, verbose):
         console.print("[red]No data. Run backfill_prices.py first.[/red]")
         raise SystemExit(1)
 
+    if sentiment_cache:
+        console.print(f"  Sentiment cache  : {sentiment_cache}")
     console.print("\nTraining ensemble …\n")
     try:
         pipeline, cv_scores = train_ensemble(
             ohlcv_data, signal_cfg,
             forward_days=forward_days,
             ensemble_path=ensemble_path,
+            sentiment_cache_path=sentiment_cache,
         )
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")

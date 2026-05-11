@@ -98,6 +98,8 @@ Backtest baseline (2025 out-of-sample, ML trained on 2018–2024): Sharpe 0.44, 
 - `.env` — API keys (Tiingo, NewsAPI), ntfy topic, webhook base URL, DB paths
 - `data/ml_signal_model.joblib` — trained ML model (gitignored)
 - `data/ensemble_model.joblib` — trained ensemble model (gitignored)
+- `data/fnspid_sentiment.parquet` — FNSPID-derived sentiment cache (gitignored)
+- `data/fnspid_cache/` — raw FNSPID downloads: `news_small.csv`, `full_history.zip`, `prices.parquet` (gitignored)
 
 ### Completed phases
 
@@ -105,12 +107,21 @@ Backtest baseline (2025 out-of-sample, ML trained on 2018–2024): Sharpe 0.44, 
 **Phase 2 — Backtest engine** ✓ (`backtest/engine.py`, `backtest/metrics.py`, `scripts/run_backtest.py`)  
 **Phase 2b — ML signal layer** ✓ (`signals/ml/features.py`, `trainer.py`, `predictor.py`, `scripts/train_ml.py`)  
 **Phase 3 — Sentiment pipeline** ✓ (`sentiment/tagger.py`, 13 macro themes, NewsAPI integration, veto mechanism)  
-**Phase 4 — Ensemble** ✓ (`signals/ensemble.py`, `scripts/train_ensemble.py`)
+**Phase 4 — Ensemble** ✓ (`signals/ensemble.py`, `scripts/train_ensemble.py`)  
+**Phase 4b — FNSPID historical sentiment** ✓ (`scripts/prepare_fnspid.py`, ensemble patched to accept `--sentiment-cache`)
+
+### FNSPID integration — conclusions
+
+- **Dataset**: `Zihan1004/FNSPID` on HuggingFace. Used `All_external.csv` (5.7 GB). License: CC BY-NC-4.0 (personal use only).
+- **Pipeline**: `scripts/prepare_fnspid.py --watchlist --small` streams the CSV in 50k-row chunks (RAM-safe), extracts per-ticker price history from the zip, scores headlines with the existing keyword tagger, and saves `data/fnspid_sentiment.parquet`.
+- **Retrain**: `scripts/train_ensemble.py --watchlist --sentiment-cache data/fnspid_sentiment.parquet`
+- **Results**: Ensemble CV ROC-AUC 0.789. Sentiment weight went from 0 → 0.13 (non-zero for first time). Backtest unchanged: Sharpe 0.44, win rate 50%, expectancy 0.63%, max drawdown 3%.
+- **Why no backtest improvement**: The keyword tagger achieves only 3.9% directional agreement with 10-day returns on FNSPID headlines — too noisy to move the needle with a 0.13 weight over 22 trades. The infrastructure is now in place; improvement requires Phase 3b.
 
 ### Remaining phases
 
 **Phase 3b — Learned ticker-contextualized embeddings**
-Upgrade `sentiment/tagger.py` keyword matching to a sentence-transformer model trained on `(headline_embedding ⊕ ticker_embedding) → price_direction`. Requires GDELT historical headline backfill (paid NewsAPI or GDELT BigQuery). Fixes noisy keyword matches on the free NewsAPI tier.
+Replace `sentiment/tagger.py` keyword matching with a sentence-transformer model trained on FNSPID `(headline_embedding ⊕ ticker_embedding) → price_direction`. Training data is now available via `prepare_fnspid.py`. The keyword tagger achieves only 3.9% directional agreement; learned embeddings should improve this substantially and give the ensemble a meaningful sentiment weight.
 
 **Ensemble retraining (ongoing)**
-As the live system accumulates `Opportunity` records with real sentiment scores and outcomes, periodically retrain the ensemble on that data. Sentiment weight is currently 0 (no historical training data); it will become non-zero as live data accumulates.
+Retrain periodically as live `Opportunity` records accumulate real sentiment scores and outcomes. Use `--sentiment-cache` to include FNSPID historical data alongside live data.
