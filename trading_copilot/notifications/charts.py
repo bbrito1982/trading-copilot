@@ -117,7 +117,7 @@ def generate_chart(
         title=title,
         volume=True,
         addplot=add_plots if add_plots else None,
-        panel_ratios=(4, 1, 2) if any(p.panel == 2 for p in add_plots) else (4, 1),
+        panel_ratios=(4, 1, 2) if any(p.get("panel", 0) == 2 for p in add_plots) else (4, 1),
         figsize=(12, 8),
         tight_layout=True,
         returnfig=True,

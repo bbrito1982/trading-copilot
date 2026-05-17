@@ -54,6 +54,7 @@ class Opportunity:
     indicators: dict = field(default_factory=dict)
     sentiment_score: float | None = None      # -1 to +1 if available
     sentiment_themes: list[str] = field(default_factory=list)
+    top_headlines: list[str] = field(default_factory=list)
 
     @property
     def signal_types(self) -> list[str]:

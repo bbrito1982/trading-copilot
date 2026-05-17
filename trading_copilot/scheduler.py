@@ -22,6 +22,7 @@ from trading_copilot.notifications.ntfy import (
     send_signal_alert,
     send_text,
 )
+from trading_copilot.signals.rules import compute_indicators
 from trading_copilot.signals.scorer import score_ticker
 from trading_copilot.tracker.models import create_tables
 from trading_copilot.tracker.positions import (
@@ -81,18 +82,19 @@ def _fetch_macro_headlines() -> list[str]:
     return _macro_headlines_cache
 
 
-def _fetch_sentiment(ticker: str) -> tuple[float | None, list[str]]:
-    """Fetch ticker-specific + macro headlines, blend, return (sentiment_score, themes)."""
+def _fetch_sentiment(ticker: str) -> tuple[float | None, list[str], list[str]]:
+    """Fetch ticker-specific + macro headlines, blend, return (sentiment_score, themes, top_headlines)."""
     from datetime import date, timedelta
     query = TICKER_QUERIES.get(ticker)
     if not settings.news_api_key:
-        return None, []
+        return None, [], []
     try:
         today = date.today()
 
         # Ticker-specific score (neural)
         ticker_score: float | None = None
         themes: list[str] = []
+        top_headlines: list[str] = []
         if query:
             articles = fetch_newsapi(query, from_date=today - timedelta(days=3), to_date=today)
             store_headlines(articles, query)
@@ -100,6 +102,8 @@ def _fetch_sentiment(ticker: str) -> tuple[float | None, list[str]]:
             result = score_headlines_neural(ticker, headlines)
             ticker_score = result.score if headlines else None
             themes = result.matched_themes
+            # Keep top 2 article titles for display in notifications
+            top_headlines = [a["title"] for a in articles[:2] if a.get("title")]
 
         # Macro score (keyword theme table applied to market-wide headlines)
         macro_score: float | None = None
@@ -112,10 +116,10 @@ def _fetch_sentiment(ticker: str) -> tuple[float | None, list[str]]:
         if macro_score is not None and blended != ticker_score:
             themes = list(set(themes + ["macro"]))
 
-        return blended, themes
+        return blended, themes, top_headlines
     except Exception as exc:
         logger.warning("Sentiment fetch failed for %s: %s", ticker, exc)
-        return None, []
+        return None, [], []
 
 
 def run_daily_scan():
@@ -123,17 +127,31 @@ def run_daily_scan():
     send_text("🔍 Trading Copilot", "Daily scan started")
 
     found = 0
+    ticker_rsi: dict[str, float] = {}
+    macro_sentiment_score: float | None = None
+
     for ticker in watchlist:
         try:
             df = _fetch_df(ticker)
             if df.empty:
                 continue
-            sentiment_score, sentiment_themes = _fetch_sentiment(ticker)
+
+            ind = compute_indicators(df.copy(), signals_cfg)
+            rsi_val = ind.iloc[-1].get("rsi")
+            if rsi_val is not None:
+                ticker_rsi[ticker] = round(float(rsi_val), 1)
+
+            sentiment_score, sentiment_themes, top_headlines = _fetch_sentiment(ticker)
+            if sentiment_score is not None and macro_sentiment_score is None:
+                macro_sentiment_score = sentiment_score
+
             opp = score_ticker(
                 ticker, df, signals_cfg, swing_cfg,
                 sentiment_score=sentiment_score,
                 sentiment_themes=sentiment_themes,
             )
+            if opp is not None:
+                opp.top_headlines = top_headlines
             if opp is None or opp.conviction < conviction_threshold:
                 continue
 
@@ -160,15 +178,37 @@ def run_daily_scan():
 
             chart = generate_chart(ticker, df, opportunity=opp, cfg=signals_cfg, lookback_days=chart_lookback)
             reason = ", ".join(s.signal_type.replace("_", " ") for s in opp.signals)
-            send_discovery_alert(ticker, reason, opp.conviction, chart)
+            current_price = float(df.iloc[-1].get("adj_close", df.iloc[-1].get("close", 0)))
+            rsi_val = opp.indicators.get("rsi")
+            send_discovery_alert(ticker, reason, opp.conviction, chart, current_price=current_price, rsi=rsi_val)
             discoveries += 1
         except Exception as exc:
             logger.error("Error in discovery %s: %s", ticker, exc)
 
-    send_text(
-        "✅ Scan complete",
-        f"Watchlist signals: {found}  |  Discoveries: {discoveries}",
+    summary_lines = [f"Signals: {found}  |  Discoveries: {discoveries}"]
+
+    # Market snapshot: key benchmarks + overbought/oversold counts
+    key_benchmarks = ["SPY", "QQQ", "GLD", "TLT"]
+    benchmark_str = "  ".join(
+        f"{t} {ticker_rsi[t]:.0f}" for t in key_benchmarks if t in ticker_rsi
     )
+    if benchmark_str:
+        summary_lines.append(f"RSI: {benchmark_str}")
+
+    overbought = [t for t, r in ticker_rsi.items() if r >= 70]
+    oversold = [t for t, r in ticker_rsi.items() if r <= 30]
+    if overbought:
+        summary_lines.append(f"Overbought (≥70): {', '.join(overbought)}")
+    if oversold:
+        summary_lines.append(f"Oversold (≤30): {', '.join(oversold)}")
+    if not overbought and not oversold:
+        summary_lines.append("All tickers in neutral RSI range")
+
+    if macro_sentiment_score is not None:
+        sent_label = "bullish" if macro_sentiment_score > 0.1 else ("bearish" if macro_sentiment_score < -0.1 else "neutral")
+        summary_lines.append(f"Macro sentiment: {sent_label} ({macro_sentiment_score:+.2f})")
+
+    send_text("✅ Scan complete", "\n".join(summary_lines))
     logger.info("=== Daily scan done: %d signals, %d discoveries ===", found, discoveries)
 
 
@@ -204,6 +244,7 @@ def run_position_monitor():
                 current_price=current_price,
                 entry_price=pos.entry_price,
                 chart_png=chart,
+                entry_date=pos.entry_date,
             )
             logger.info("Exit alert sent: %s reason=%s", pos.ticker, reason)
         except Exception as exc:
@@ -222,30 +263,25 @@ def main():
     )
 
     scheduler = BackgroundScheduler(timezone="UTC")
-    scan_cron = config.get("scheduler", {}).get("scan_cron", "30 11 * * 1-5")
-    monitor_cron = config.get("scheduler", {}).get("monitor_cron", "0 21 * * 1-5")
+    sched_cfg = config.get("scheduler", {})
+    scan_cron = sched_cfg.get("scan_cron", "30 11 * * 1-5")
+    scan_cron_us = sched_cfg.get("scan_cron_us", "30 21 * * 1-5")
+    monitor_cron = sched_cfg.get("monitor_cron", "0 21 * * 1-5")
 
-    # Parse "MIN HOUR DOW_OF_WEEK" style cron
-    scan_parts = scan_cron.split()
-    monitor_parts = monitor_cron.split()
+    def _add_cron(func, cron: str, job_id: str):
+        parts = cron.split()
+        scheduler.add_job(func, "cron", minute=parts[0], hour=parts[1], day_of_week=parts[4], id=job_id)
 
-    scheduler.add_job(
-        run_daily_scan, "cron",
-        minute=scan_parts[0], hour=scan_parts[1], day_of_week=scan_parts[4],
-        id="daily_scan",
-    )
-    scheduler.add_job(
-        run_position_monitor, "cron",
-        minute=monitor_parts[0], hour=monitor_parts[1], day_of_week=monitor_parts[4],
-        id="position_monitor",
-    )
-    scheduler.add_job(
-        breaking_monitor.tick, "interval", minutes=5,
-        id="breaking_news",
-    )
+    _add_cron(run_daily_scan, scan_cron, "daily_scan_eu")
+    _add_cron(run_daily_scan, scan_cron_us, "daily_scan_us")
+    _add_cron(run_position_monitor, monitor_cron, "position_monitor")
+    scheduler.add_job(breaking_monitor.tick, "interval", minutes=5, id="breaking_news")
 
     scheduler.start()
-    logger.info("Scheduler started. Scan: %s UTC  Monitor: %s UTC", scan_cron, monitor_cron)
+    logger.info(
+        "Scheduler started. EU scan: %s UTC  US scan: %s UTC  Monitor: %s UTC",
+        scan_cron, scan_cron_us, monitor_cron,
+    )
 
     # Run FastAPI webhook in the same process
     uvicorn.run(

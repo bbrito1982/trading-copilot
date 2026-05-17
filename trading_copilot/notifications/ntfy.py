@@ -33,14 +33,34 @@ def send_signal_alert(
     conviction_pct = f"{opportunity.conviction * 100:.0f}%"
     signal_names = ", ".join(s.signal_type.replace("_", " ") for s in opportunity.signals)
 
+    entry = opportunity.entry_price
+    stop = opportunity.stop_loss
+    target = opportunity.target
+    risk_pct = abs(entry - stop) / entry * 100
+    gain_pct = abs(target - entry) / entry * 100
+    rr = gain_pct / risk_pct if risk_pct else 0
+
+    rsi = opportunity.indicators.get("rsi", "—")
+    vol = opportunity.indicators.get("vol_ratio", "—")
+    rsi_str = f"{rsi:.1f}" if isinstance(rsi, float) else str(rsi)
+    vol_str = f"{vol:.1f}x" if isinstance(vol, float) else str(vol)
+
+    sentiment_line = ""
+    if opportunity.sentiment_score is not None:
+        sent_label = "bullish" if opportunity.sentiment_score > 0.1 else ("bearish" if opportunity.sentiment_score < -0.1 else "neutral")
+        themes = ", ".join(opportunity.sentiment_themes[:3]) if opportunity.sentiment_themes else "—"
+        sentiment_line = f"\nSentiment:  {sent_label} ({themes})"
+        for hl in (opportunity.top_headlines or [])[:2]:
+            sentiment_line += f"\n  • {hl[:90]}"
+
     title = f"{emoji} {direction}: {opportunity.ticker}  [{conviction_pct} conviction]"
     body = (
-        f"Entry zone: ${opportunity.entry_price:.2f}\n"
-        f"Stop loss:  ${opportunity.stop_loss:.2f}\n"
-        f"Target:     ${opportunity.target:.2f}\n"
-        f"Signals:    {signal_names}\n"
-        f"RSI: {opportunity.indicators.get('rsi', '—')}  "
-        f"Vol ratio: {opportunity.indicators.get('vol_ratio', '—')}x"
+        f"Entry:   ${entry:.2f}\n"
+        f"Stop:    ${stop:.2f}  (−{risk_pct:.1f}%)\n"
+        f"Target:  ${target:.2f}  (+{gain_pct:.1f}%)\n"
+        f"R/R:     {rr:.1f} : 1  |  Hold ~10 days\n"
+        f"Signals: {signal_names}\n"
+        f"RSI: {rsi_str}  Vol: {vol_str}{sentiment_line}"
     )
 
     webhook = settings.webhook_base_url.rstrip("/")
@@ -59,18 +79,34 @@ def send_exit_alert(
     current_price: float,
     entry_price: float,
     chart_png: bytes,
+    entry_date=None,
 ) -> bool:
     """Send a sell/exit notification for an open position."""
+    from datetime import date as _date
     pnl_pct = (current_price - entry_price) / entry_price * 100
     sign = "+" if pnl_pct >= 0 else ""
     emoji = "🟢" if pnl_pct >= 0 else "🔴"
 
-    title = f"{emoji} EXIT signal: {ticker}  ({sign}{pnl_pct:.1f}%)"
+    reason_labels = {
+        "stop": "Stop loss hit",
+        "target": "Target reached",
+        "signal_reversal": "Signal reversal",
+        "manual": "Manual exit",
+    }
+    reason_str = reason_labels.get(reason, reason.replace("_", " "))
+
+    hold_line = ""
+    if entry_date is not None:
+        today = _date.today()
+        entry = entry_date if isinstance(entry_date, _date) else _date.fromisoformat(str(entry_date))
+        hold_days = (today - entry).days
+        hold_line = f"\nHeld:  {hold_days} day{'s' if hold_days != 1 else ''}"
+
+    title = f"{emoji} EXIT: {ticker}  ({sign}{pnl_pct:.1f}%)"
     body = (
-        f"Reason:        {reason.replace('_', ' ')}\n"
-        f"Entry price:   ${entry_price:.2f}\n"
-        f"Current price: ${current_price:.2f}\n"
-        f"P&L:           {sign}{pnl_pct:.1f}%"
+        f"Reason: {reason_str}\n"
+        f"Entry:  ${entry_price:.2f}  →  Now: ${current_price:.2f}\n"
+        f"P&L:    {sign}{pnl_pct:.1f}%{hold_line}"
     )
 
     webhook = settings.webhook_base_url.rstrip("/")
@@ -86,10 +122,17 @@ def send_discovery_alert(
     reason: str,
     conviction: float,
     chart_png: bytes,
+    current_price: float | None = None,
+    rsi: float | None = None,
 ) -> bool:
     """Suggest adding a ticker to the watchlist."""
     title = f"🔭 Consider watching: {ticker}"
-    body = f"Reason: {reason}\nConviction: {conviction * 100:.0f}%"
+    extra = ""
+    if current_price is not None:
+        extra += f"\nPrice: ${current_price:.2f}"
+    if rsi is not None:
+        extra += f"  RSI: {rsi:.1f}"
+    body = f"Reason: {reason}\nConviction: {conviction * 100:.0f}%{extra}"
     return _send_with_image(title, body, chart_png, priority="default")
 
 
@@ -106,12 +149,22 @@ def send_breaking_news_alert(
     emoji = "⚡📈" if opportunity.direction == "buy" else "⚡📉"
     conviction_pct = f"{opportunity.conviction * 100:.0f}%"
 
+    entry = opportunity.entry_price
+    stop = opportunity.stop_loss
+    target = opportunity.target
+    risk_pct = abs(entry - stop) / entry * 100
+    gain_pct = abs(target - entry) / entry * 100
+    rr = gain_pct / risk_pct if risk_pct else 0
+    rsi = opportunity.indicators.get("rsi")
+    rsi_str = f"  RSI: {rsi:.1f}" if isinstance(rsi, float) else ""
+
     title = f"{emoji} BREAKING: {opportunity.ticker} {direction}  [{conviction_pct}]"
     body = (
-        f"News: {item.title[:120]}\n"
-        f"Entry: ${opportunity.entry_price:.2f}  "
-        f"Stop: ${opportunity.stop_loss:.2f}  "
-        f"Target: ${opportunity.target:.2f}"
+        f"News: {item.title[:100]}\n"
+        f"Entry:  ${entry:.2f}{rsi_str}\n"
+        f"Stop:   ${stop:.2f}  (−{risk_pct:.1f}%)\n"
+        f"Target: ${target:.2f}  (+{gain_pct:.1f}%)\n"
+        f"R/R:    {rr:.1f} : 1"
     )
 
     webhook = settings.webhook_base_url.rstrip("/")

@@ -52,16 +52,18 @@ The system is a swing trading assistant that scans stocks/ETFs for signals, moni
 
 ```
 APScheduler (scheduler.py)
-  ├── Daily scan (6:30 AM ET)
+  ├── EU scan (11:30 UTC / 6:30 AM ET) — EU tickers have ~4h of fresh data; US tickers use prior close
   │     ├── tiingo.py → DuckDB cache (OHLCV)
   │     ├── news.py → NewsAPI headlines (last 3 days)
-  │     ├── sentiment/tagger.py → ticker + macro sentiment, blended
+  │     ├── sentiment/tagger.py → ticker + macro sentiment, blended; returns top 2 headlines
   │     ├── signals/rules.py → RSI, MACD, MA crossover, volume spike
   │     ├── signals/scorer.py → conviction (ensemble > ML > rule-based)
   │     │     ├── signals/ml/predictor.py → P(profitable) from GradientBoosting
   │     │     └── signals/ensemble.py → meta-model blend of all three layers
   │     ├── notifications/charts.py → mplfinance PNG (daily candles)
-  │     └── notifications/ntfy.py → push alert with Enter/Skip buttons
+  │     ├── notifications/ntfy.py → push alert with Enter/Skip buttons
+  │     └── scan-complete ntfy → RSI snapshot, overbought/oversold counts, macro sentiment
+  ├── US scan (21:30 UTC / 4:30 PM ET) — same pipeline, fresh US end-of-day closes
   ├── Breaking news monitor (every 5 min, market hours only)
   │     ├── news/rss.py → RSSPoller polls 6 RSS feeds, deduplicates by URL hash
   │     ├── news/breaking.py → scores each item with neural embedder
@@ -101,7 +103,7 @@ Backtest baseline (2025 out-of-sample, ML trained on 2018–2024): Sharpe 0.44, 
 
 ### Configuration
 
-- `config.yaml` — watchlist (17 tickers: US large-caps + IDVY, IGLN, JEDI, WQTM, RBOT, EURN), signal parameters, scheduler cron times, swing trade percentages, `breaking_conviction_threshold` (default 0.4)
+- `config.yaml` — watchlist (17 tickers: US large-caps + IDVY, IGLN, JEDI, WQTM, RBOT, EURN), signal parameters, scheduler cron times (`scan_cron` EU 11:30 UTC, `scan_cron_us` US 21:30 UTC, `monitor_cron` 21:00 UTC), swing trade percentages, `breaking_conviction_threshold` (default 0.4)
 - `.env` — API keys (Tiingo, NewsAPI), ntfy topic, `WEBHOOK_BASE_URL=http://143.47.48.68` (nginx proxies port 80 → 8000), DB paths
 - `data/ml_signal_model.joblib` — trained ML model (gitignored)
 - `data/ensemble_model.joblib` — trained ensemble model (gitignored)
@@ -132,6 +134,14 @@ Backtest baseline (2025 out-of-sample, ML trained on 2018–2024): Sharpe 0.44, 
 **Phase 4b — FNSPID historical sentiment** ✓ (`scripts/prepare_fnspid.py`, ensemble patched to accept `--sentiment-cache`)  
 **Phase 3b — Neural sentiment embedder** ✓ (`sentiment/embedder.py`, `scripts/train_embedder.py`, `score_headlines_neural()` with keyword fallback; `prepare_fnspid.py` now also outputs `fnspid_headlines.parquet`)  
 **Phase 5 — Breaking news monitor** ✓ (`news/rss.py`, `news/breaking.py`, `data/intraday.py`; 5-min APScheduler job, intraday chart generation, ntfy alerts with working Enter/Skip buttons)
+
+### Notification content (ntfy.py)
+
+- **Signal alert**: entry/stop/target with risk % and gain %, R/R ratio, hold estimate, RSI, vol ratio, sentiment label + up to 2 raw NewsAPI headlines that drove it
+- **Scan-complete alert** (always sent, even on 0-signal days): RSI for SPY/QQQ/GLD/TLT, overbought/oversold ticker lists, macro sentiment score — explains why no signals fired
+- **Exit alert**: human-readable exit reason, entry→current price, P&L %, hold days
+- **Breaking news alert**: triggering headline, entry/stop/target on separate lines, R/R ratio, RSI
+- **Discovery alert**: reason, conviction %, current price, RSI
 
 ### FNSPID integration — conclusions
 
