@@ -286,7 +286,7 @@ def main():
     # Run FastAPI webhook in the same process
     uvicorn.run(
         "trading_copilot.api.webhook:app",
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=8000,
         log_level="info",
     )
