@@ -228,6 +228,19 @@ TICKER_QUERIES: dict[str, str] = {
     "TLT": "treasury bonds yield",
     "XLE": "energy sector oil",
     "XLF": "financial sector banks",
+    "IDVY": "European dividend stocks",
+    "IGLN": "gold bullion physical gold",
+    "JEDI": "space innovation satellite",
+    "WQTM": "quantum computing technology",
+    "RBOT": "robotics automation industry",
+    "EURN": "Euronav crude oil tanker shipping",
+    "HEAL.UK": "healthcare innovation biotech",
+    "URNU.DE": "uranium mining nuclear energy",
+    "HYCN.DE": "hydrogen energy fuel cell",
+    "DTG.DE": "Daimler Truck",
+    "CEBT.DE": "essential metals mining copper lithium",
+    "IQQQ.DE": "water infrastructure utility",
+    "DFEN.DE": "defense sector military spending",
 }
 
 

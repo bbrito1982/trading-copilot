@@ -16,6 +16,13 @@ watchlist:
   - WQTM
   - RBOT
   - EURN
+  - URNU.DE
+  - HYCN.DE
+  - DTG.DE
+  - HEAL.UK
+  - CEBT.DE
+  - IQQQ.DE
+  - DFEN.DE
 
 # Signals fire when conviction >= this threshold (0-1).
 # Conviction = sum(weight * signal_strength). Because signal strengths are
@@ -52,9 +59,9 @@ swing:
 
 scheduler:
   # Cron expression for daily scan (UTC)
-  scan_cron: "30 11 * * 1-5"    # 11:30 UTC = ~6:30 AM ET, good for EU tickers (markets open ~4h)
-  scan_cron_us: "30 21 * * 1-5" # 21:30 UTC = ~4:30 PM ET, US close — fresh end-of-day data
-  monitor_cron: "0 21 * * 1-5"  # 21:00 UTC = ~4:00 PM ET after close
+  scan_cron: "30 16 * * mon-fri"    # 16:30 UTC = 17:30 Lisbon, after EU market close
+  scan_cron_us: "30 21 * * mon-fri" # 21:30 UTC = 22:30 Lisbon, US close — fresh end-of-day data
+  monitor_cron: "0 21 * * mon-fri"  # 21:00 UTC = 22:00 Lisbon, after US close
 
 notifications:
   # Chart look-back window in days

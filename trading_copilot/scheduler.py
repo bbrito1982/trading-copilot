@@ -64,8 +64,8 @@ def _fetch_macro_headlines() -> list[str]:
         _macro_headlines_cache = []
         return []
     macro_query = (
-        "Federal Reserve interest rates inflation recession GDP "
-        "oil price OPEC dollar treasury bonds market crash rally"
+        "Federal Reserve OR inflation OR recession OR \"interest rates\" OR "
+        "GDP OR OPEC OR \"oil price\" OR \"treasury bonds\" OR \"stock market\""
     )
     try:
         from datetime import date, timedelta
@@ -73,7 +73,7 @@ def _fetch_macro_headlines() -> list[str]:
         articles = fetch_newsapi(macro_query, from_date=today - timedelta(days=3), to_date=today)
         store_headlines(articles, macro_query)
         _macro_headlines_cache = [
-            a.get("title", "") + " " + (a.get("description") or "") for a in articles
+            (a.get("title") or "") + " " + (a.get("description") or "") for a in articles
         ]
         logger.info("Macro headlines fetched: %d articles", len(_macro_headlines_cache))
     except Exception as exc:
@@ -98,7 +98,7 @@ def _fetch_sentiment(ticker: str) -> tuple[float | None, list[str], list[str]]:
         if query:
             articles = fetch_newsapi(query, from_date=today - timedelta(days=3), to_date=today)
             store_headlines(articles, query)
-            headlines = [a.get("title", "") + " " + (a.get("description") or "") for a in articles]
+            headlines = [(a.get("title") or "") + " " + (a.get("description") or "") for a in articles]
             result = score_headlines_neural(ticker, headlines)
             ticker_score = result.score if headlines else None
             themes = result.matched_themes

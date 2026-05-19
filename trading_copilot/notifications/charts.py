@@ -81,17 +81,8 @@ def generate_chart(
             panel=2, color="#9C27B0", ylabel="RSI", ylim=(0, 100),
         ))
 
-    # Horizontal lines for signal levels
+    # Horizontal lines drawn manually after plot to avoid mplfinance kwarg version issues
     hlines = {}
-    if opportunity:
-        hlines = {
-            "hlines": [opportunity.stop_loss, opportunity.target],
-            "colors": ["#F44336", "#4CAF50"],
-            "linestyle": "--",
-            "linewidths": 1,
-        }
-    elif entry_price:
-        hlines = {}
 
     style = mpf.make_mpf_style(
         base_mpf_style="nightclouds",
@@ -123,6 +114,12 @@ def generate_chart(
         returnfig=True,
         **hlines,
     )
+
+    # Draw stop/target lines manually
+    if opportunity:
+        ax = axes[0]
+        ax.axhline(opportunity.stop_loss, color="#F44336", linewidth=1, linestyle="--", alpha=0.8)
+        ax.axhline(opportunity.target, color="#4CAF50", linewidth=1, linestyle="--", alpha=0.8)
 
     # Mark entry point if tracking a position
     if entry_date and entry_price:
