@@ -47,6 +47,19 @@ COMPANY_NAMES: dict[str, str] = {
     "gold": "GLD", "treasury": "TLT", "t-bond": "TLT",
     "energy": "XLE", "oil": "XLE", "crude": "XLE",
     "bank": "XLF", "financial": "XLF", "jpmorgan": "XLF",
+    # EU watchlist tickers
+    "dividend": "IDVY", "european dividend": "IDVY",
+    "uranium": "URNU.DE", "nuclear energy": "URNU.DE",
+    "hydrogen": "HYCN.DE", "fuel cell": "HYCN.DE",
+    "daimler": "DTG.DE", "daimler truck": "DTG.DE",
+    "critical metal": "CEBT.DE", "essential metal": "CEBT.DE", "lithium": "CEBT.DE",
+    "water": "IQQQ.DE", "water infrastructure": "IQQQ.DE",
+    "defense": "DFEN.DE", "defence": "DFEN.DE", "vaneck defense": "DFEN.DE",
+    "healthcare innovation": "HEAL.UK", "biotech": "HEAL.UK",
+    "euronav": "EURN", "tanker": "EURN",
+    "robotics": "RBOT", "automation": "RBOT",
+    "quantum": "WQTM", "quantum computing": "WQTM",
+    "space": "JEDI", "satellite": "JEDI",
 }
 
 

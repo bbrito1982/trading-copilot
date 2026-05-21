@@ -26,8 +26,10 @@ from trading_copilot.signals.rules import compute_indicators
 from trading_copilot.signals.scorer import score_ticker
 from trading_copilot.tracker.models import create_tables
 from trading_copilot.tracker.positions import (
+    already_actioned_today,
     check_exit_conditions,
     get_open_positions,
+    has_open_position,
     save_opportunity,
 )
 
@@ -153,6 +155,13 @@ def run_daily_scan():
             if opp is not None:
                 opp.top_headlines = top_headlines
             if opp is None or opp.conviction < conviction_threshold:
+                continue
+
+            if has_open_position(ticker):
+                logger.info("Skipping %s — already have an open position", ticker)
+                continue
+            if already_actioned_today(ticker):
+                logger.info("Skipping %s — already entered or skipped today", ticker)
                 continue
 
             record = save_opportunity(opp)

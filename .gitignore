@@ -1,5 +1,6 @@
 .env
 data/
+!trading_copilot/data/
 .venv/
 __pycache__/
 *.pyc

@@ -105,6 +105,29 @@ def close_position(
         return pos
 
 
+def already_actioned_today(ticker: str, db_engine=None) -> bool:
+    """Return True if an opportunity for this ticker was already entered or skipped today."""
+    engine = db_engine or get_engine()
+    with Session(engine) as session:
+        stmt = select(Opportunity).where(
+            Opportunity.ticker == ticker,
+            Opportunity.date == date.today(),
+            Opportunity.action.in_(["entered", "skipped"]),  # type: ignore[attr-defined]
+        )
+        return session.exec(stmt).first() is not None
+
+
+def has_open_position(ticker: str, db_engine=None) -> bool:
+    """Return True if there is already an open position for this ticker."""
+    engine = db_engine or get_engine()
+    with Session(engine) as session:
+        stmt = select(Position).where(
+            Position.ticker == ticker,
+            Position.status == "open",
+        )
+        return session.exec(stmt).first() is not None
+
+
 def get_open_positions(db_engine=None) -> list[Position]:
     engine = db_engine or get_engine()
     with Session(engine) as session:
